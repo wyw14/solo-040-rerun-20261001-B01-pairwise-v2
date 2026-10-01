@@ -15,11 +15,12 @@ import (
 
 // Planner owns convoy plans and their admission queue membership.
 type Planner struct {
-	mu        sync.RWMutex
-	plans     map[uuid.UUID]model.ConvoyPlan
-	admission *admission.Service
-	recorder  *journal.Recorder
-	now       func() time.Time
+	mu         sync.RWMutex
+	plans      map[uuid.UUID]model.ConvoyPlan
+	cancelling map[uuid.UUID]bool
+	admission  *admission.Service
+	recorder   *journal.Recorder
+	now        func() time.Time
 }
 
 func NewPlanner(admissionService *admission.Service, recorder *journal.Recorder, now func() time.Time) *Planner {
@@ -27,8 +28,8 @@ func NewPlanner(admissionService *admission.Service, recorder *journal.Recorder,
 		now = time.Now
 	}
 	return &Planner{
-		plans: make(map[uuid.UUID]model.ConvoyPlan), admission: admissionService,
-		recorder: recorder, now: now,
+		plans: make(map[uuid.UUID]model.ConvoyPlan), cancelling: make(map[uuid.UUID]bool),
+		admission: admissionService, recorder: recorder, now: now,
 	}
 }
 

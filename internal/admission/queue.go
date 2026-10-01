@@ -2,6 +2,7 @@ package admission
 
 import (
 	"errors"
+	"sort"
 	"sync"
 
 	"github.com/google/uuid"
@@ -12,12 +13,14 @@ type QueueEntry struct {
 	Vessel   model.Vessel `json:"vessel"`
 	PlanID   uuid.UUID    `json:"plan_id"`
 	Released bool         `json:"released"`
+	seq      uint64
 }
 
 // Queue preserves FIFO order while supporting convoy cancellation recovery.
 type Queue struct {
 	mu      sync.RWMutex
 	entries map[string][]QueueEntry
+	counter uint64
 }
 
 func NewQueue() *Queue { return &Queue{entries: make(map[string][]QueueEntry)} }
@@ -28,7 +31,10 @@ func (q *Queue) Add(chamberID string, planID uuid.UUID, vessels []model.Vessel) 
 	}
 	q.mu.Lock()
 	for _, vessel := range vessels {
-		q.entries[chamberID] = append(q.entries[chamberID], QueueEntry{Vessel: vessel, PlanID: planID})
+		q.counter++
+		q.entries[chamberID] = append(q.entries[chamberID], QueueEntry{
+			Vessel: vessel, PlanID: planID, seq: q.counter,
+		})
 	}
 	q.mu.Unlock()
 	return nil
@@ -56,6 +62,9 @@ func (q *Queue) MarkReleased(chamberID string, vesselID uuid.UUID) bool {
 	return false
 }
 
+// RemovePlan detaches every entry of a plan while preserving their original
+// ordering and release flags. The returned slice is owned by the caller and is
+// safe to hand back to Restore.
 func (q *Queue) RemovePlan(chamberID string, planID uuid.UUID) []QueueEntry {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -73,16 +82,29 @@ func (q *Queue) RemovePlan(chamberID string, planID uuid.UUID) []QueueEntry {
 	return removed
 }
 
+// Restore is the exact inverse of RemovePlan: entries are returned to their
+// original FIFO positions with their release flags intact. Entries that are
+// already present (for example after a concurrent operation) are skipped, so a
+// compensation rollback never duplicates a vessel or reorders the queue.
 func (q *Queue) Restore(chamberID string, entries []QueueEntry) {
-	q.mu.Lock()
-	current := q.entries[chamberID]
-	restored := make([]QueueEntry, 0, len(entries)+len(current))
-	for _, entry := range entries {
-		entry.Released = false
-		restored = append(restored, entry)
+	if len(entries) == 0 {
+		return
 	}
-	q.entries[chamberID] = append(restored, current...)
-	q.mu.Unlock()
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	present := make(map[uint64]bool, len(q.entries[chamberID])+len(entries))
+	for _, entry := range q.entries[chamberID] {
+		present[entry.seq] = true
+	}
+	merged := append([]QueueEntry(nil), q.entries[chamberID]...)
+	for _, entry := range entries {
+		if !present[entry.seq] {
+			merged = append(merged, entry)
+			present[entry.seq] = true
+		}
+	}
+	sort.Slice(merged, func(i, j int) bool { return merged[i].seq < merged[j].seq })
+	q.entries[chamberID] = merged
 }
 
 func (q *Queue) List(chamberID string) []QueueEntry {

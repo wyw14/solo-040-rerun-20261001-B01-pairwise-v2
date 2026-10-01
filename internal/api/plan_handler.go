@@ -7,7 +7,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/wyw14/cry-96/internal/model"
-	"github.com/wyw14/cry-96/internal/signal"
 )
 
 type vesselInput struct {
@@ -100,24 +99,20 @@ func cancelPlanHandler(runtime *Runtime) http.HandlerFunc {
 			writeError(w, http.StatusNotFound, errors.New("plan not found"))
 			return
 		}
-		cycleValue, ok := runtime.Cycles.Current(plan.ChamberID)
-		publication := signal.Publication{
-			CycleID: cycleValue.ID, Generation: cycleValue.Generation,
-			Previous: make(map[uuid.UUID]model.SignalState),
+		// Capture the live field signals before any state changes so that a
+		// compensation that fails partway can still be retried against the
+		// exact pre-cancel snapshot, even if the cycle is gone afterwards.
+		cycleID, generation := uuid.Nil, uint64(0)
+		if cycleValue, cycleOK := runtime.Cycles.Current(plan.ChamberID); cycleOK {
+			cycleID, generation = cycleValue.ID, cycleValue.Generation
 		}
-		if ok {
-			for _, vessel := range plan.Vessels {
-				if _, exists := runtime.SignalStore.Get(vessel.ID); exists {
-					publication.Published = append(publication.Published, vessel.ID)
-				}
-			}
-		}
+		publication := runtime.SignalPublisher.CancellationPublication(cycleID, generation, model.SignalProceed, plan.Vessels)
 		result, err := runtime.Schedule.Cancel(r.Context(), planID, "operator cancellation", publication)
 		if err != nil {
 			writeError(w, http.StatusConflict, err)
 			return
 		}
-		if ok {
+		if _, cycleOK := runtime.Cycles.Current(plan.ChamberID); cycleOK {
 			_, _ = runtime.Cycles.Cancel(r.Context(), plan.ChamberID, "operator cancellation")
 		}
 		writeJSON(w, http.StatusOK, result)
